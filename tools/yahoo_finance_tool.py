@@ -21,8 +21,8 @@ import shlex
 from pathlib import Path
 
 CLI = Path.home() / ".hermes" / "scripts" / "yahoo-finance" / "yahoo_finance.py"
-# Also support direct module run if symlink/workdir differs
-CLI_FALLBACK = Path(__file__).parent.parent / ".hermes" / "scripts" / "yahoo-finance" / "yahoo_finance.py"
+# Fallback when the wrapper runs from a repo checkout: the CLI lives at cli/
+CLI_FALLBACK = Path(__file__).parent.parent / "cli" / "yahoo_finance.py"
 
 # ── check_fn ──
 def _check_yfinance() -> bool:
@@ -144,6 +144,10 @@ def _build_argv(args: dict) -> list[str]:
     if action not in _ACTION_MAP:
         raise ValueError(f"unknown action '{action}'; valid: {sorted(_ACTION_MAP)}")
     sub = _ACTION_MAP[action]
+    # canonicalize so every downstream branch sees one name per action
+    # (e.g. web_news -> web-news); alias variants in the elif chains below
+    # are then redundant but harmless.
+    action = sub
     cli = str(_resolve_cli())
     argv = [sys.executable, cli, sub]
 
@@ -261,7 +265,7 @@ def _build_argv(args: dict) -> list[str]:
             argv  # --count is the CLI flag name
         # CLI uses --count for news; map limit→count (already handled)
     elif action == "search":
-        if args.get("limit") is not None and action == "search":
+        if args.get("limit") is not None:
             _flag("limit", args["limit"])
     elif action == "screener":
         if args.get("limit") is not None:
@@ -303,9 +307,7 @@ def _build_argv(args: dict) -> list[str]:
     elif action == "web-news":
         if args.get("limit") is not None:
             _flag("limit", args["limit"])
-    elif action in ("web-news_alias",):  # no-op guard
-        pass
-    elif action in ("web-article","web_article"):
+    elif action == "web-article":
         pass
     elif action == "industry":
         pass

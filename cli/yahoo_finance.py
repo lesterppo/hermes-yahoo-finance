@@ -41,12 +41,26 @@ import json
 import sys
 import os
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List
 
 OUTPUT_DIR = Path(os.environ.get("YFINANCE_OUTPUT_DIR", str(Path.home() / ".hermes" / "yfinance_output")))
 
 # ── helpers ──
+
+_PERIOD_DAYS = {"1d": 1, "5d": 5, "1mo": 30, "3mo": 91, "6mo": 182,
+                "1y": 365, "2y": 730, "5y": 1825, "10y": 3650}
+
+def _period_start(period: str):
+    """Return a cutoff date for a yfinance-style period label, or None."""
+    p = (period or "").strip().lower()
+    if p == "ytd":
+        now = datetime.now(timezone.utc)
+        return datetime(now.year, 1, 1, tzinfo=timezone.utc)
+    days = _PERIOD_DAYS.get(p)
+    if days:
+        return datetime.now(timezone.utc) - timedelta(days=days)
+    return None
 
 def _ensure_out() -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -122,7 +136,7 @@ def _df_to_compact(df, max_rows: int = 50) -> Dict:
         return {"n":
             n, "rows": recs}
     # spill
-    p = _ensure_out() / f"yfinance_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.json"
+    p = _ensure_out() / f"yfinance_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}.json"
     p.write_text(json.dumps(recs, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"n":
         n, "rows": recs[:max_rows], "truncated": True, "full_file": str(p), "hint": f"Full {n} rows at {p}"}
@@ -181,7 +195,7 @@ def do_quote(args):
         "currentPrice": "price", "regularMarketPrice": "price",
         "previousClose": "prevClose", "open": "open", "dayHigh": "hi", "dayLow": "lo",
         "volume": "vol", "averageVolume": "avgVol", "marketCap": "mktCap",
-        "trailingPE": "pe", "forwardPE": "fpe", "dividendYield": "divYield",
+        "trailingPE": "pe", "forwardPE": "fpe", "dividendYield": "divYieldPct",
         "fiftyTwoWeekHigh": "w52hi", "fiftyTwoWeekLow": "w52lo",
         "fiftyDayAverage": "ma50", "twoHundredDayAverage": "ma200",
         "shortName": "name", "longName": "longName", "symbol": "sym",
@@ -192,9 +206,10 @@ def do_quote(args):
         "earningsTimestamp": "earnTs", "earningsTimestampStart": "earnTs0", "earningsTimestampEnd": "earnTs1",
     }
     if fields:
-        # allow both raw and mapped keys
+        # allow both raw and mapped keys (divYield is the legacy alias for divYieldPct)
         rev = {v:
             k for k, v in key_map.items()}
+        rev["divYield"] = "dividendYield"
         out = {}
         for f in fields:
             raw = rev.get(f, f)
@@ -202,6 +217,9 @@ def do_quote(args):
                 out[f] = _j(info[raw])
             elif f in info:
                 out[f] = _j(info[f])
+        if len(out) <= 1:
+            # no requested field matched — fail closed like the default path
+            _err(f"no matching fields for {sym} (requested: {','.join(fields)})", symbol=sym, fields=fields)
         out["sym"] = sym
         _ok(out, symbol=sym)
         return
@@ -274,10 +292,10 @@ def do_history(args):
     # spill handling
     limit = args.limit or 100
     if len(recs) > limit:
-        p = _ensure_out() / f"history_{sym}_{period}_{interval}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.json"
+        p = _ensure_out() / f"history_{sym}_{period}_{interval}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}.json"
         p.write_text(json.dumps(recs, ensure_ascii=False, indent=2), encoding="utf-8")
         _ok({"meta":
-            meta, "rows": recs[:limit], "truncated": True, "full_file": str(p), "hint": f"Full {len(recs)} rows at {p}"}, symbol=sym)
+            meta, "rows": recs[-limit:], "truncated": True, "truncated_from": "oldest", "full_file": str(p), "hint": f"Full {len(recs)} rows at {p}"}, symbol=sym)
     else:
         _ok({"meta":
             meta, "rows": recs}, symbol=sym)
@@ -317,7 +335,7 @@ def do_info(args):
         return
     # no filter → return compact + spill raw
     # keep full info as spill file for agent
-    p = _ensure_out() / f"info_{sym}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.json"
+    p = _ensure_out() / f"info_{sym}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}.json"
     p.write_text(json.dumps(_j(info), ensure_ascii=False, indent=2), encoding="utf-8")
     # compact preview
     preview_keys = sections["quote"][:14]
@@ -336,6 +354,9 @@ def do_financials(args):
         _err("statement must be income|balance|cash", code=1)
     if period not in ("annual","quarterly","ttm"):
         _err("period must be annual|quarterly|ttm", code=1)
+    if stmt == "balance" and period == "ttm":
+        _err("ttm is not meaningful for the balance sheet (point-in-time snapshot); use annual|quarterly",
+             code=1, symbol=sym, statement=stmt, period=period)
     t = yf.Ticker(sym)
     try:
         if stmt == "income":
@@ -377,7 +398,7 @@ def do_financials(args):
     if len(cols) > 30:
         meta["line_items_truncated"] = True
         meta["total_line_items"] = len(cols)
-    p = _ensure_out() / f"financials_{sym}_{stmt}_{period}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.json"
+    p = _ensure_out() / f"financials_{sym}_{stmt}_{period}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}.json"
     p.write_text(json.dumps(recs, ensure_ascii=False, indent=2), encoding="utf-8")
     # preview: first 2 periods, first 8 line items
     preview = []
@@ -457,10 +478,18 @@ def do_dividends(args):
     t = yf.Ticker(sym)
     try:
         s = t.dividends
-        # dividends is a Series indexed by date; optionally filter by history period
-        if period != "max" and len(s):
-            # refetch via history to respect period? simplest: slice
-            pass
+        # honor --period by slicing the date-indexed series
+        if period != "max" and s is not None and len(s):
+            cutoff = _period_start(period)
+            if cutoff is not None:
+                # dividends index may be tz-aware or naive — compare naively
+                idx = s.index
+                cut = cutoff
+                if getattr(idx, "tz", None) is not None:
+                    idx = idx.tz_localize(None)
+                    cut = cutoff.replace(tzinfo=None)
+                s = s[idx >= cut]
+            # unrecognized period label: keep full history (period echoed in output)
         if s is None or len(s) == 0:
             _ok({"symbol":
                 sym, "n": 0, "rows": []}, symbol=sym)
@@ -471,7 +500,7 @@ def do_dividends(args):
     except Exception as e:
         _err(f"dividends failed for {sym}: {e}", symbol=sym)
     _ok({"symbol":
-        sym, "n": len(recs), "rows": recs[-50:] if len(recs) > 50 else recs, "total": len(recs)}, symbol=sym)
+        sym, "period": period, "n": len(recs), "rows": recs[-50:] if len(recs) > 50 else recs, "total": len(recs)}, symbol=sym)
 
 def do_splits(args):
     yf = _import_yf()
@@ -518,7 +547,7 @@ def do_options(args):
     if not expiry:
         expiry = exps[0]
     if expiry not in exps:
-        _err(f"expiry {expiry} not in {list(exps)[:10]}... (n={len(exps)})", symbol=sym, expiry=expiry)
+        _err(f"expiry {expiry} not in {list(exps)[:10]}... (n={len(exps)})", code=1, symbol=sym, expiry=expiry)
     kind = (args.kind or "both").lower()
     if kind not in ("calls","puts","both"):
         _err("kind must be calls|puts|both", code=1)
@@ -533,7 +562,7 @@ def do_options(args):
         calls = chain.calls
         recs = _df_to_records(calls)
         if len(recs) > max_rows:
-            p = _ensure_out() / f"options_{sym}_{expiry}_calls_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.json"
+            p = _ensure_out() / f"options_{sym}_{expiry}_calls_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}.json"
             p.write_text(json.dumps(recs, ensure_ascii=False, indent=2), encoding="utf-8")
             out["calls"] = {"n":
                 len(recs), "rows": recs[:max_rows], "truncated": True, "full_file": str(p)}
@@ -544,7 +573,7 @@ def do_options(args):
         puts = chain.puts
         recs = _df_to_records(puts)
         if len(recs) > max_rows:
-            p = _ensure_out() / f"options_{sym}_{expiry}_puts_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.json"
+            p = _ensure_out() / f"options_{sym}_{expiry}_puts_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}.json"
             p.write_text(json.dumps(recs, ensure_ascii=False, indent=2), encoding="utf-8")
             out["puts"] = {"n":
                 len(recs), "rows": recs[:max_rows], "truncated": True, "full_file": str(p)}
@@ -603,10 +632,13 @@ def do_news(args):
     for it in items[:
         args.count or 5]:
         c = it.get("content", {}) if isinstance(it, dict) else {}
+        _summary = (c.get("summary") or c.get("description") or "")
+        _truncated = len(_summary) > 300
         rows.append(_j({
             "id": it.get("id"),
             "title": c.get("title"),
-            "summary": (c.get("summary") or c.get("description") or "")[:300],
+            "summary": _summary[:300] + ("…" if _truncated else ""),
+            "summary_truncated": _truncated,
             "pubDate": c.get("pubDate") or c.get("displayTime"),
             "url": c.get("clickThroughUrl", {}).get("url") if isinstance(c.get("clickThroughUrl"), dict) else c.get("clickThroughUrl") or c.get("canonicalUrl", {}).get("url") if isinstance(c.get("canonicalUrl"), dict) else None,
             "provider": (c.get("provider") or {}).get("displayName") if isinstance(c.get("provider"), dict) else None,
@@ -644,12 +676,14 @@ def do_screener(args):
     name = args.name.strip()
     if not name:
         _err("screener name required", code=1)
-    from yfinance.screener.screener import PREDEFINED_SCREENER_QUERIES
-    if name not in PREDEFINED_SCREENER_QUERIES:
-        _err(f"unknown screener '{name}'; valid: {sorted(PREDEFINED_SCREENER_QUERIES)}", screener=name, code=1)
     limit = args.limit or 25
     offset = args.offset or 0
     try:
+        # private import kept inside try so a yfinance-internal move
+        # surfaces as a clean JSON error, not a traceback
+        from yfinance.screener.screener import PREDEFINED_SCREENER_QUERIES
+        if name not in PREDEFINED_SCREENER_QUERIES:
+            _err(f"unknown screener '{name}'; valid: {sorted(PREDEFINED_SCREENER_QUERIES)}", screener=name, code=1)
         import yfinance as _yf2
         # Use yfinance's own screen() which handles crumb+cookies via YfData
         if offset:
@@ -759,7 +793,7 @@ def do_download(args):
             preview[tk] = _df_to_records(sub.reset_index())
         out["preview"] = preview
         if len(df) > 5 or len(tickers) > 5:
-            p = _ensure_out() / f"download_{'_'.join(syms[:3])}_{period}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.json"
+            p = _ensure_out() / f"download_{'_'.join(syms[:3])}_{period}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}.json"
             # flatten for file
             flat = df.reset_index()
             # convert MultiIndex columns to strings
@@ -772,7 +806,7 @@ def do_download(args):
         recs = _df_to_records(df.reset_index())
         out["rows"] = recs[-10:] if len(recs) > 10 else recs
         if len(recs) > 10:
-            p = _ensure_out() / f"download_{syms[0]}_{period}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.json"
+            p = _ensure_out() / f"download_{syms[0]}_{period}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}.json"
             p.write_text(json.dumps(recs, ensure_ascii=False, indent=2), encoding="utf-8")
             out["full_file"] = str(p)
     _ok(out, symbols=syms)
@@ -820,12 +854,13 @@ def do_analysis(args):
         _err("symbol required", code=1)
     t = yf.Ticker(sym)
     out: Dict[str, Any] = {"symbol": sym}
+    unavailable = []
     try:
         pt = t.get_analyst_price_targets()
         if pt:
             out["price_targets"] = _j(pt)
     except Exception:
-        pass
+        unavailable.append("price_targets")
     for attr, key in [
         ("eps_trend", "eps_trend"),
         ("eps_revisions", "eps_revisions"),
@@ -839,9 +874,11 @@ def do_analysis(args):
             elif df is not None and hasattr(df, "__len__") and len(df):
                 out[key] = _j(df) if isinstance(df, dict) else _df_to_records(df)  # type: ignore[arg-type]
         except Exception:
-            pass
+            unavailable.append(key)
     if len(out) <= 1:
         _err(f"no analysis data for {sym} (may be an ETF/index without analyst coverage)", symbol=sym)
+    if unavailable:
+        out["unavailable"] = unavailable
     _ok(out, symbol=sym)
 
 
@@ -874,7 +911,7 @@ def do_filings(args):
     preview = [_j(r) for r in rows[:limit]]
     p = None
     if len(rows) > limit:
-        p = _ensure_out() / f"filings_{sym}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.json"
+        p = _ensure_out() / f"filings_{sym}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}.json"
         p.write_text(json.dumps([_j(r) for r in rows], ensure_ascii=False, indent=2), encoding="utf-8")
     _ok({"symbol": sym, "n": len(rows), "rows": preview, **({"full_file": str(p), "hint": f"Full {len(rows)} filings at {p}"} if p else {})}, symbol=sym)
 
@@ -915,21 +952,30 @@ def do_funds(args):
         ("asset_classes", "asset_classes"),
         ("fund_operations", "fund_operations"),
     ]
+    failed = []
     for attr, key in mapping:
         try:
             v = getattr(fd, attr, None)
             if v is None:
                 continue
             if hasattr(v, "columns"):
-                out[key] = _j(_df_to_compact(v, max_rows=30))
+                df = v
+                # yfinance labels the weight column "Holding Percent" but
+                # stores fractions (0.0808); scale so the label is true.
+                if "Holding Percent" in df.columns:
+                    df = df.copy()
+                    df["Holding Percent"] = (df["Holding Percent"] * 100).round(4)
+                out[key] = _j(_df_to_compact(df, max_rows=30))
             elif isinstance(v, dict) and v:
                 out[key] = _j(v)
             elif v:
                 out[key] = _j(v)
         except Exception:
-            pass
+            failed.append(attr)
     if len(out) <= 1:
         _err(f"no fund data for {sym}", symbol=sym)
+    if failed:
+        out["unavailable"] = failed
     _ok(out, symbol=sym)
 
 
@@ -976,7 +1022,7 @@ def do_shares(args):
     preview = recs[-limit:] if len(recs) > limit else recs
     out: Dict[str, Any] = {"symbol": sym, "n": len(recs), "rows": preview}
     if len(recs) > limit:
-        p = _ensure_out() / f"shares_{sym}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.json"
+        p = _ensure_out() / f"shares_{sym}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}.json"
         p.write_text(json.dumps(recs, ensure_ascii=False, indent=2), encoding="utf-8")
         out["full_file"] = str(p)
     _ok(out, symbol=sym)
@@ -1028,10 +1074,10 @@ def do_market(args):
         m = Market(name)
         status = m.status
     except Exception as e:
-        _err(f"market '{name}' failed: {e}", sector=name)
+        _err(f"market '{name}' failed: {e}", region=name)
     if status is None:
-        _err(f"no market status for '{name}' (valid: US, GB, ASIA, EUROPE, RATES, COMMODITIES, CURRENCIES, CRYPTOCURRENCIES)", sector=name)
-    _ok({"market": name, "status": _j(status)}, sector=name)
+        _err(f"no market status for '{name}' (valid: US, GB, ASIA, EUROPE, RATES, COMMODITIES, CURRENCIES, CRYPTOCURRENCIES)", region=name)
+    _ok({"market": name, "status": _j(status)}, region=name)
 
 
 def do_lookup(args):
@@ -1080,17 +1126,17 @@ def do_trending(args):
         j = _yahoo_get(f"https://query2.finance.yahoo.com/v1/finance/trending/{region}", {"count": str(count), "useQuotes": str(use_quotes).lower()})
         result = (j.get("finance") or {}).get("result") or []
         if not result:
-            _err(f"no trending data for region {region}", sector=region)
+            _err(f"no trending data for region {region}", region=region)
         quotes = result[0].get("quotes") or []
         if use_quotes:
             rows = [_j(q) for q in quotes[:count]]
         else:
             rows = [{"symbol": q.get("symbol")} for q in quotes[:count] if q.get("symbol")]
-        _ok({"region": region, "count": len(rows), "rows": rows, "trendingScore": any("trendingScore" in r for r in rows)}, sector=region)
+        _ok({"region": region, "count": len(rows), "rows": rows, "hasTrendingScore": any("trendingScore" in r for r in rows)}, region=region)
     except SystemExit:
         raise
     except Exception as e:
-        _err(f"trending failed for {region}: {e}", sector=region)
+        _err(f"trending failed for {region}: {e}", region=region)
 
 
 def do_chart(args):
@@ -1126,7 +1172,7 @@ def do_chart(args):
                 "close": (q.get("close") or [None])[i] if i < len(q.get("close") or []) else None,
                 "volume": (q.get("volume") or [None])[i] if i < len(q.get("volume") or []) else None,
             }))
-        _ok({"symbol": sym, "period": period, "interval": interval, "meta": _j({k: meta[k] for k in ("currency","exchangeName","fullExchangeName","instrumentType","regularMarketPrice","chartPreviousClose","fiftyTwoWeekHigh","fiftyTwoWeekLow") if k in meta}), "n": len(rows), "rows": rows}, symbol=sym)
+        _ok({"symbol": sym, "period": period, "interval": interval, "meta": _j({k: meta[k] for k in ("currency","exchangeName","fullExchangeName","instrumentType","regularMarketPrice","chartPreviousClose","fiftyTwoWeekHigh","fiftyTwoWeekLow","currentTradingPeriod") if k in meta}), "n": len(rows), "rows": rows}, symbol=sym)
     except SystemExit:
         raise
     except Exception as e:
