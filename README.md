@@ -17,7 +17,7 @@ Yahoo Finance has no official public API. `yfinance` covers the data layer, but 
 | Tier | Backend | Auth | What it adds |
 |------|---------|------|--------------|
 | 1. Structured data (28) | [`yfinance`](https://github.com/ranaroussi/yfinance) via `YfData` crumb | no key | quotes, OHLCV, full info, income/balance/cash × annual/quarterly/TTM, holders, calendar, earnings, dividends, splits, options chain, recommendations, upgrades, news, search, predefined+custom screener, bulk download, sector/industry, analyst estimates, ESG, SEC filings, fund holdings, ISIN, shares, market status, lookup |
-| 2. Raw website (5) | Direct Yahoo HTTP (`requests`, `query1`/`query2`) | **no crumb, no login** | `trending` (homepage module), `chart` (v8 bars + `currentTradingPeriod`), `ysearch` (scored autocomplete), `web-news` (topic sections), `web-article` (full text) |
+| 2. Raw website (5) | Direct Yahoo HTTP (`curl_cffi` Chrome-TLS impersonation for HTML, `requests`/`query1`/`query2` for APIs) | **no crumb, no login** | `trending` (homepage module), `chart` (v8 bars + `currentTradingPeriod`), `ysearch` (scored autocomplete), `web-news` (topic sections), `web-article` (full text) |
 
 **Not in scope:** Watchlist / Portfolio / Alerts — auth-gated (Yahoo login cookie, no public endpoint).
 
@@ -26,7 +26,7 @@ Yahoo Finance has no official public API. `yfinance` covers the data layer, but 
 ### CLI (standalone, no Hermes needed)
 
 ```bash
-pip install yfinance requests
+pip install yfinance requests curl_cffi  # curl_cffi: Chrome-TLS impersonation for Yahoo HTML pages (web-news, web-article); plain requests is the fallback
 git clone https://github.com/lesterppo/hermes-yahoo-finance.git
 cd hermes-yahoo-finance
 python cli/yahoo_finance.py quote AAPL

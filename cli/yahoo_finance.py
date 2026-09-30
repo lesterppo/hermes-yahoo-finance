@@ -168,6 +168,22 @@ def _err(msg: str, code: int = 2, **extra) -> None:
 # Fields with no data are omitted (token-minimal). Envelopes
 # (symbol/query/topic, n, rows) are unchanged.
 
+def _html_get(url, timeout=15):
+    """GET a finance.yahoo.com HTML page (no raise — caller checks status).
+
+    Yahoo's HTML hosts drop non-browser TLS fingerprints (TLS handshake
+    completes, then the server closes with an empty reply — measured
+    2026-09-30). Prefer curl_cffi with Chrome impersonation when it is
+    installed; fall back to plain requests.
+    """
+    try:
+        from curl_cffi import requests as _cr
+        return _cr.get(url, impersonate="chrome", timeout=timeout)
+    except ImportError:
+        pass
+    import requests as _rq
+    return _rq.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
+
 def _to_iso_ts(v):
     """Best-effort timestamp -> ISO string (epoch numbers handled)."""
     if v is None:
@@ -1275,30 +1291,42 @@ def do_web_news(args):
         if local_provider.exists() and _ilu.spec_from_file_location("web_local_provider", str(local_provider)):
             # Use requests + readability-style extract inline (avoid importing plugin machinery)
             pass
-        import requests as _rq
         from html import unescape as _ue
-        r = _rq.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        if r.status_code == 404:
-            _err(f"topic not found: {topic} (tried {url}); try: stock-market-news, latest-news, earnings, economy, personal-finance, crypto", query=topic)
+        r = _html_get(url, timeout=15)
+        if r.status_code == 404:            _err(f"topic not found: {topic} (tried {url}); try: stock-market-news, latest-news, earnings, economy, personal-finance, crypto", query=topic)
         r.raise_for_status()
         html = r.text
         # Lightweight extract: find article links + titles from Yahoo topic pages
         import re as _re
         items = []
-        # Yahoo topic pages render cards with href="/markets/article/..." etc + titles nearby
-        for m in _re.finditer(r'href="(/(?:markets|economy|technology|personal-finance|real-estate|media-advertising)/[^"]+)"[^>]*>.*? title="([^"]+)"|href="(/(?:markets|economy|technology)[^"]+)"', html, _re.DOTALL):
-            href = m.group(1) or m.group(3)
-            title = (m.group(2) or "").strip()
-            if href and title and len(title) > 12:
-                items.append({"title": _ue(title)[:220], "url": f"https://finance.yahoo.com{href}"})
+        def _add(title, href):
+            title = _ue(_re.sub(r"\s+", " ", title or "")).strip()
+            if not href or not title or len(title) <= 12:
+                return
+            if not href.startswith("http"):
+                href = "https://finance.yahoo.com" + href
+            if not any(x["url"] == href for x in items):
+                items.append({"title": title[:220], "url": href})
+        # Primary (measured 2026-09-30): headline cards are <a ... elm:hdln ...>Title</a>
+        for m in _re.finditer(r'<a([^>]*elm:hdln[^>]*)>(.*?)</a>', html, _re.DOTALL):
+            hm = _re.search(r'href="([^"]+)"', m.group(1))
+            txt = _re.sub(r"<[^>]+>", "", m.group(2))
+            if hm:
+                _add(txt, hm.group(1))
             if len(items) >= (args.limit or 20):
                 break
-        # Fallback: grab any finance.yahoo.com article hrefs if regex above missed
+        # Legacy fallbacks for older markup variants
+        if len(items) < 3:
+            for m in _re.finditer(r'href="(/(?:markets|economy|technology|personal-finance|real-estate|media-advertising)/[^"]+)"[^>]*>.*? title="([^"]+)"', html, _re.DOTALL):
+                _add(m.group(2), m.group(1))
+                if len(items) >= (args.limit or 20):
+                    break
         if len(items) < 3:
             for href in _re.findall(r'href="(https://finance\.yahoo\.com/[^"]+)"', html):
                 if "/article/" in href or "/articles/" in href or "/live/" in href:
-                    if not any(x["url"] == href for x in items):
-                        items.append({"title": href.split("/")[-1].replace("-", " ")[:120], "url": href})
+                    slug = href.split("/")[-1].split(".html")[0]
+                    slug = _re.sub(r"-\d+$", "", slug)  # strip trailing article id
+                    _add(slug.replace("-", " "), href)
                 if len(items) >= (args.limit or 20):
                     break
         _ok({"topic": topic, "url": url, "n": len(items), "rows": [_news_item(title=i["title"], url=i["url"]) for i in items[: args.limit or 20]]}, query=topic)
@@ -1315,10 +1343,9 @@ def do_web_article(args):
     if not url.startswith("http"):
         url = "https://finance.yahoo.com" + ("/" + url.lstrip("/"))
     try:
-        import requests as _rq
         from html import unescape as _ue
         import re as _re
-        r = _rq.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        r = _html_get(url, timeout=15)
         r.raise_for_status()
         html = r.text
         # Extract <title> and article body
