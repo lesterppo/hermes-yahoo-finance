@@ -129,6 +129,24 @@ Schema is ~1.2KB (single `action` dispatch vs. 33 separate tools ≈ 94% token s
 
 Large payloads (full info, multi-ticker download): `{"ok": true, "r": {"hint": "full data at ...", "full_file": "/home/.../.hermes/yfinance_output/info_AAPL_....json"}}`
 
+### News items — unified v2 schema (2026-09-30)
+
+Every action that returns news (`news`, `search` news_preview, `ysearch`
+news, `web-news` rows) emits the same canonical item. Fields with no
+data are omitted:
+
+```json
+{"title": "...", "url": "...", "publisher": "Motley Fool",
+ "published": "2026-09-30T12:08:00+00:00", "summary": "...",
+ "id": "763d83ec-...", "kind": "STORY"}
+```
+
+- `published`: ISO timestamp (`providerPublishTime` epochs are converted).
+- `summary` (300-char cap) and `summary_truncated` appear only where the
+  source provides one (`news`).
+- `search` news_preview no longer passes through raw Yahoo payloads
+  (`thumbnail`, `relatedTickers` removed).
+
 ## For AI agents — AGENTS.md
 
 See **[AGENTS.md](AGENTS.md)** for agent-native integration: quick start, wire-into-toolset, 33-action dispatch examples, pitfall list, and file map. Copy-paste ready for Hermes, Claude Code, Codex.

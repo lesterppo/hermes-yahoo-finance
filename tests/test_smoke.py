@@ -33,3 +33,20 @@ def test_tool_schema_has_33_actions():
     assert '"chart"' in text
     assert "ysearch" in text
     assert "web-news" in text or "web_news" in text
+
+def test_news_item_unified_schema():
+    """v2: every news producer must emit the canonical item shape."""
+    import importlib.util, sys
+    spec = importlib.util.spec_from_file_location("yf_cli", str(REPO / "cli" / "yahoo_finance.py"))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["yf_cli"] = mod
+    spec.loader.exec_module(mod)
+    full = mod._news_item(title="T", url="https://x", publisher="P", published=1727683200,
+                          summary="S", summary_truncated=True, nid="abc", kind="STORY")
+    assert full == {"title": "T", "url": "https://x", "publisher": "P",
+                    "published": "2024-09-30T08:00:00+00:00", "summary": "S",
+                    "id": "abc", "kind": "STORY", "summary_truncated": True}
+    thin = mod._news_item(title="T", url="https://x")
+    assert thin == {"title": "T", "url": "https://x"}  # absent fields omitted
+    passthrough = mod._news_item(title="T", published="2026-09-29T19:47:34Z")
+    assert passthrough["published"] == "2026-09-29T19:47:34Z"  # ISO strings kept

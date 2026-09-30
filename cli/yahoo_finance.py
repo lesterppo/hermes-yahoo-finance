@@ -161,6 +161,41 @@ def _err(msg: str, code: int = 2, **extra) -> None:
     sys.stdout.write("\n")
     sys.exit(code)
 
+# ── v2 unified news-item schema (2026-09-30) ──────────────────────────
+# Every action that returns news items (news, search, ysearch, web-news)
+# emits the same canonical shape:
+#   {title, url, publisher, published (ISO), summary, id, kind}
+# Fields with no data are omitted (token-minimal). Envelopes
+# (symbol/query/topic, n, rows) are unchanged.
+
+def _to_iso_ts(v):
+    """Best-effort timestamp -> ISO string (epoch numbers handled)."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)) and v > 0:
+        try:
+            return datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
+        except Exception:
+            return v
+    return v
+
+def _news_item(title=None, url=None, publisher=None, published=None,
+               summary=None, summary_truncated=False, nid=None, kind=None):
+    item = {
+        "title": title,
+        "url": url,
+        "publisher": publisher,
+        "published": _to_iso_ts(published),
+        "summary": summary,
+        "id": nid,
+        "kind": kind,
+    }
+    if summary_truncated:
+        item["summary_truncated"] = True
+    return _j({k: v for k, v in item.items() if v is not None})
+
 # ── action impls ──
 
 def _import_yf():
@@ -634,16 +669,19 @@ def do_news(args):
         c = it.get("content", {}) if isinstance(it, dict) else {}
         _summary = (c.get("summary") or c.get("description") or "")
         _truncated = len(_summary) > 300
-        rows.append(_j({
-            "id": it.get("id"),
-            "title": c.get("title"),
-            "summary": _summary[:300] + ("…" if _truncated else ""),
-            "summary_truncated": _truncated,
-            "pubDate": c.get("pubDate") or c.get("displayTime"),
-            "url": c.get("clickThroughUrl", {}).get("url") if isinstance(c.get("clickThroughUrl"), dict) else c.get("clickThroughUrl") or c.get("canonicalUrl", {}).get("url") if isinstance(c.get("canonicalUrl"), dict) else None,
-            "provider": (c.get("provider") or {}).get("displayName") if isinstance(c.get("provider"), dict) else None,
-            "type": c.get("contentType"),
-        }))
+        _url = (c.get("clickThroughUrl", {}).get("url") if isinstance(c.get("clickThroughUrl"), dict) else c.get("clickThroughUrl")
+                or c.get("canonicalUrl", {}).get("url") if isinstance(c.get("canonicalUrl"), dict) else None)
+        _provider = (c.get("provider") or {}).get("displayName") if isinstance(c.get("provider"), dict) else None
+        rows.append(_news_item(
+            title=c.get("title"),
+            url=_url,
+            publisher=_provider,
+            published=c.get("pubDate") or c.get("displayTime"),
+            summary=_summary[:300] + ("…" if _truncated else ""),
+            summary_truncated=_truncated,
+            nid=it.get("id"),
+            kind=c.get("contentType"),
+        ))
     _ok({"symbol":
         sym, "n": len(rows), "rows": rows}, symbol=sym)
 
@@ -666,7 +704,14 @@ def do_search(args):
     out: Dict[str, Any] = {"query": q, "n": len(rows), "rows": rows}
     if news:
         out["news_n"] = len(news)
-        out["news_preview"] = _j(news[:2])
+        out["news_preview"] = [_news_item(
+            title=n.get("title") if isinstance(n, dict) else None,
+            url=n.get("link") if isinstance(n, dict) else None,
+            publisher=n.get("publisher") if isinstance(n, dict) else None,
+            published=n.get("providerPublishTime") if isinstance(n, dict) else None,
+            nid=n.get("uuid") if isinstance(n, dict) else None,
+            kind=n.get("type") if isinstance(n, dict) else None,
+        ) for n in news[:2]]
     if not rows:
         _err(f"no results for '{q}'", query=q)
     _ok(out, query=q)
@@ -1192,7 +1237,14 @@ def do_ysearch(args):
         rows = [_j({k: qu[k] for k in ("symbol","shortname","longname","exchange","quoteType","typeDisp","sector","industry","exchDisp","score") if k in qu}) for qu in quotes[:qc]]
         nrows = []
         for n in news[:nc]:
-            nrows.append(_j({"uuid": n.get("uuid"), "title": n.get("title"), "publisher": n.get("publisher"), "url": n.get("link") or n.get("clickThroughUrl","")}))
+            nrows.append(_news_item(
+                title=n.get("title"),
+                url=n.get("link") or n.get("clickThroughUrl", ""),
+                publisher=n.get("publisher"),
+                published=n.get("providerPublishTime"),
+                nid=n.get("uuid"),
+                kind=n.get("type"),
+            ))
         out: dict = {"query": q, "quotes": rows, "n_quotes": len(rows)}
         if nrows:
             out["news"] = nrows
@@ -1249,7 +1301,7 @@ def do_web_news(args):
                         items.append({"title": href.split("/")[-1].replace("-", " ")[:120], "url": href})
                 if len(items) >= (args.limit or 20):
                     break
-        _ok({"topic": topic, "url": url, "n": len(items), "rows": items[: args.limit or 20]}, query=topic)
+        _ok({"topic": topic, "url": url, "n": len(items), "rows": [_news_item(title=i["title"], url=i["url"]) for i in items[: args.limit or 20]]}, query=topic)
     except SystemExit:
         raise
     except Exception as e:
