@@ -168,6 +168,10 @@ def do_quote(args):
         _err(f"quote failed for {sym}: {e}", symbol=sym)
     if not info:
         _err(f"no data for symbol {sym} (invalid ticker?)", symbol=sym)
+    # yfinance marks unknown/delisted symbols with quoteType "NONE" —
+    # fail closed instead of returning ok:true with no price data.
+    if str(info.get("quoteType", "")).upper() == "NONE":
+        _err(f"no quote for symbol {sym} (invalid ticker or delisted)", symbol=sym)
     # compact fields
     fields = None
     if args.fields:
@@ -198,7 +202,7 @@ def do_quote(args):
                 out[f] = _j(info[raw])
             elif f in info:
                 out[f] = _j(info[f])
-        out["_symbol"] = sym
+        out["sym"] = sym
         _ok(out, symbol=sym)
         return
     # default compact — detect invalid ticker (info has only nulls / single key)
